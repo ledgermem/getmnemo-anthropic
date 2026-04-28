@@ -268,8 +268,12 @@ async function runMemoryTool(
       typeof raw.tags === "object" && raw.tags
         ? (raw.tags as Record<string, unknown>)
         : {};
+    // Model-supplied `tags` are merged FIRST so trusted server-controlled
+    // baseMetadata (userId, workspaceId, etc.) cannot be overwritten by an
+    // LLM via prompt injection — e.g. a model that emits
+    // tags={"userId":"victim"} would otherwise reattribute the memory.
     const memory = await client.add(content, {
-      metadata: { ...baseMetadata, ...tags },
+      metadata: { ...tags, ...baseMetadata },
     });
     return { memory };
   }
