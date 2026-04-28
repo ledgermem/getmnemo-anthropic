@@ -158,23 +158,40 @@ export function withMemoryTool(
         });
         responses.push(resp);
 
-        const toolUses = resp.content.filter(
+        // Anthropic requires every tool_use block in an assistant turn to be
+        // answered with a matching tool_result in the next user turn. Collect
+        // ALL tool_use blocks (not just memory ones) so the message list stays
+        // valid; non-memory tools get a structured error result.
+        const allToolUses = resp.content.filter(
           (b): b is Extract<MessageBlock, { type: "tool_use" }> =>
-            b.type === "tool_use" && b.name === MEMORY_TOOL_NAME,
+            b.type === "tool_use",
         );
 
         messages.push({ role: "assistant", content: resp.content });
 
-        if (resp.stop_reason !== "tool_use" || toolUses.length === 0) {
+        if (resp.stop_reason !== "tool_use" || allToolUses.length === 0) {
           return finalize(messages, responses, toolCalls);
         }
 
         const toolResults: Array<Record<string, unknown>> = [];
-        for (const use of toolUses) {
+        for (const use of allToolUses) {
+          if (use.name !== MEMORY_TOOL_NAME) {
+            toolResults.push({
+              type: "tool_result",
+              tool_use_id: use.id,
+              is_error: true,
+              content: JSON.stringify({
+                error: `Unknown tool: ${use.name}. Only '${MEMORY_TOOL_NAME}' is available.`,
+              }),
+            });
+            continue;
+          }
           toolCalls += 1;
           const result = await runMemoryTool(
             use.input,
             options.ledgermem,
+            // Trusted server metadata (input.metadata, defaults.metadata)
+            // wins over any tool input fields a model could fabricate.
             { ...defaults.metadata, ...(input.metadata ?? {}) },
             defaults.searchLimit,
           );
