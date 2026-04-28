@@ -101,6 +101,11 @@ export function withMemoryTool(
       "Long-term memory store. Use action='search' to recall facts about the user before answering, and action='add' to save a new fact worth remembering across conversations.",
     input_schema: {
       type: "object" as const,
+      // additionalProperties:false lets Anthropic enforce strict JSON schema
+      // for tool inputs — without it the model can pass arbitrary keys
+      // (including keys that look like trusted metadata) and we silently
+      // accept them.
+      additionalProperties: false,
       properties: {
         action: {
           type: "string",
@@ -246,8 +251,14 @@ async function runMemoryTool(
   if (action === "search") {
     const query = String(raw.query ?? "").trim();
     if (!query) return { error: "query is required for search" };
-    const limit = Number(raw.limit ?? defaultLimit) || defaultLimit;
-    const results = await client.search(query, { limit });
+    // Clamp the limit into [1, 50] regardless of what the model asked for —
+    // a hostile/buggy tool input could otherwise pass a huge value (or 0)
+    // that bypasses the JSON-schema bounds and torches the context window.
+    const requested = Number(raw.limit ?? defaultLimit);
+    const limit = Number.isFinite(requested)
+      ? Math.min(50, Math.max(1, Math.floor(requested)))
+      : defaultLimit;
+    const results = (await client.search(query, { limit })) ?? [];
     return { results };
   }
   if (action === "add") {
