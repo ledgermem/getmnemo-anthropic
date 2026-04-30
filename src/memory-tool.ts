@@ -1,4 +1,4 @@
-import type { Mnemo } from "@getmnemo/memory";
+import type { Mnemo } from "@mnemo/memory";
 
 /** Structural subset of `Anthropic` we depend on — keeps the peer dep loose. */
 interface AnthropicLike {
