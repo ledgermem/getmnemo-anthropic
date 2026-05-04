@@ -1,4 +1,4 @@
-import type { Mnemo } from "@mnemo/memory";
+import type { Mnemo } from "getmnemo";
 
 /** Structural subset of `Anthropic` we depend on — keeps the peer dep loose. */
 interface AnthropicLike {
@@ -258,7 +258,7 @@ async function runMemoryTool(
     const limit = Number.isFinite(requested)
       ? Math.min(50, Math.max(1, Math.floor(requested)))
       : defaultLimit;
-    const results = (await client.search(query, { limit })) ?? [];
+    const results = (await client.search({ query, limit })).hits ?? [];
     return { results };
   }
   if (action === "add") {
@@ -272,9 +272,7 @@ async function runMemoryTool(
     // baseMetadata (userId, workspaceId, etc.) cannot be overwritten by an
     // LLM via prompt injection — e.g. a model that emits
     // tags={"userId":"victim"} would otherwise reattribute the memory.
-    const memory = await client.add(content, {
-      metadata: { ...tags, ...baseMetadata },
-    });
+    const memory = await client.add({ content, metadata: { ...tags, ...baseMetadata } });
     return { memory };
   }
   return { error: `unknown action: ${action}` };
