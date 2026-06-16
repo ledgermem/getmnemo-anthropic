@@ -1,6 +1,6 @@
 {
   "name": "getmnemo-anthropic",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Mnemo helper for the Anthropic SDK — memory tool, prompt caching, and extended thinking wired together.",
   "type": "module",
   "main": "./dist/index.js",
@@ -30,7 +30,10 @@
     "tool-use",
     "prompt-caching"
   ],
-  "author": "Mnemo <founders@mnemohq.com>",
+  "author": {
+    "name": "Mnemo",
+    "url": "https://mnemohq.com"
+  },
   "license": "MIT",
   "repository": {
     "type": "git",
