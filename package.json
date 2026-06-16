@@ -1,6 +1,6 @@
 {
   "name": "getmnemo-anthropic",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Mnemo helper for the Anthropic SDK — memory tool, prompt caching, and extended thinking wired together.",
   "type": "module",
   "main": "./dist/index.js",

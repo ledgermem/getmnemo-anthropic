@@ -34,7 +34,7 @@ const memory = new Mnemo({
 const agent = withMemoryTool({
   client: claude,
   getmnemo: memory,
-  model: "claude-sonnet-4-7",
+  model: "claude-sonnet-4-6",
   thinkingBudgetTokens: 4000,
 });
 
@@ -68,7 +68,7 @@ console.log("memory tool calls:", result.memoryToolCalls);
 | --- | --- | --- | --- |
 | `client` | `Anthropic` | — | An `@anthropic-ai/sdk` client (anything with `messages.create`). |
 | `getmnemo` | `Mnemo` | — | A `Mnemo` instance from `getmnemo`. |
-| `model` | `string` | `"claude-sonnet-4-7"` | Default model; override per call. |
+| `model` | `string` | `"claude-sonnet-4-6"` | Default model; override per call. |
 | `maxTokens` | `number` | `1024` | Default `max_tokens`; override per call. |
 | `searchLimit` | `number` | `5` | Default top-k for memory search (clamped to 1–50). |
 | `cacheSystem` | `boolean` | `true` | Wrap the system prompt with `cache_control: { type: "ephemeral" }`. |

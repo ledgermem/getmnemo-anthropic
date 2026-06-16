@@ -33,7 +33,7 @@ interface ChatMessage {
 export interface WithMemoryToolOptions {
   client: AnthropicLike;
   getmnemo: Mnemo;
-  /** Defaults to claude-sonnet-4-7. Override per call too. */
+  /** Defaults to claude-sonnet-4-6. Override per call too. */
   model?: string;
   /** Defaults to 1024. */
   maxTokens?: number;
@@ -86,7 +86,7 @@ export function withMemoryTool(
   options: WithMemoryToolOptions,
 ): WithMemoryToolWrapper {
   const defaults = {
-    model: options.model ?? "claude-sonnet-4-7",
+    model: options.model ?? "claude-sonnet-4-6",
     maxTokens: options.maxTokens ?? 1024,
     searchLimit: options.searchLimit ?? 5,
     cacheSystem: options.cacheSystem ?? true,
