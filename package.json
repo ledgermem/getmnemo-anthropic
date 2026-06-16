@@ -1,6 +1,6 @@
 {
   "name": "getmnemo-anthropic",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Mnemo helper for the Anthropic SDK — memory tool, prompt caching, and extended thinking wired together.",
   "type": "module",
   "main": "./dist/index.js",
@@ -20,7 +20,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "smoke": "node scripts/prod-smoke.mjs"
   },
   "keywords": [
     "getmnemo",
@@ -40,7 +41,7 @@
     "url": "https://github.com/ledgermem/getmnemo-anthropic.git"
   },
   "dependencies": {
-    "getmnemo": "^0.1.0"
+    "getmnemo": "^0.2.0"
   },
   "peerDependencies": {
     "@anthropic-ai/sdk": ">=0.30.0"

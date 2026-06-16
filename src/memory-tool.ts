@@ -33,6 +33,15 @@ interface ChatMessage {
 export interface WithMemoryToolOptions {
   client: AnthropicLike;
   getmnemo: Mnemo;
+  /**
+   * REQUIRED. The container tag (e.g. `"user:jane"`) that scopes every memory
+   * read/write for this wrapper. This is the TENANT-ISOLATION BOUNDARY and is
+   * supplied by YOU (the developer/server) — it is deliberately NOT part of the
+   * model-facing tool schema, so a model (or a prompt-injection attacker) can
+   * never read or write another tenant's memories by emitting a different tag.
+   * Can be overridden per `run()` via `WithMemoryRunInput.containerTag`.
+   */
+  containerTag: string;
   /** Defaults to claude-sonnet-4-6. Override per call too. */
   model?: string;
   /** Defaults to 1024. */
@@ -56,6 +65,11 @@ export interface WithMemoryRunInput {
   model?: string;
   maxTokens?: number;
   metadata?: Record<string, unknown>;
+  /**
+   * Per-call override of the configured `containerTag`. Still developer/server
+   * supplied (a `run()` argument) — NOT something the model controls.
+   */
+  containerTag?: string;
 }
 
 export interface WithMemoryRunResult {
@@ -85,7 +99,16 @@ export const MEMORY_TOOL_NAME = "memory";
 export function withMemoryTool(
   options: WithMemoryToolOptions,
 ): WithMemoryToolWrapper {
+  if (!options.containerTag || !options.containerTag.trim()) {
+    // Fail fast: an empty container tag would either 400 at the API or — worse —
+    // silently fall back to a wrong scope. The isolation boundary must be set.
+    throw new Error(
+      "withMemoryTool: `containerTag` is required and identifies the tenant " +
+        "scope for all memory reads/writes. Supply it server-side.",
+    );
+  }
   const defaults = {
+    containerTag: options.containerTag,
     model: options.model ?? "claude-sonnet-4-6",
     maxTokens: options.maxTokens ?? 1024,
     searchLimit: options.searchLimit ?? 5,
@@ -105,6 +128,11 @@ export function withMemoryTool(
       // for tool inputs — without it the model can pass arbitrary keys
       // (including keys that look like trusted metadata) and we silently
       // accept them.
+      //
+      // SECURITY: `containerTag`/`scope` are DELIBERATELY ABSENT from this
+      // schema. The container tag is the tenant-isolation boundary; it is
+      // injected by the wrapper from server config (`defaults.containerTag`)
+      // and is never a field the model can fill. Do NOT add it here.
       additionalProperties: false,
       properties: {
         action: {
@@ -141,6 +169,13 @@ export function withMemoryTool(
       const messages: ChatMessage[] = [...input.messages];
       const responses: MessagesCreateResult[] = [];
       let toolCalls = 0;
+
+      // Resolve the tenant scope once per run. Per-call override is still a
+      // server-supplied `run()` argument (like `metadata`), never model input.
+      const runContainerTag =
+        input.containerTag && input.containerTag.trim()
+          ? input.containerTag
+          : defaults.containerTag;
 
       const system = buildSystem(input.system, defaults.cacheSystem);
       const baseParams: Record<string, unknown> = {
@@ -195,6 +230,9 @@ export function withMemoryTool(
           const result = await runMemoryTool(
             use.input,
             options.getmnemo,
+            // Server-controlled container tag — the tenant boundary. Injected
+            // here; never sourced from `use.input` (model output).
+            runContainerTag,
             // Trusted server metadata (input.metadata, defaults.metadata)
             // wins over any tool input fields a model could fabricate.
             { ...defaults.metadata, ...(input.metadata ?? {}) },
@@ -244,6 +282,7 @@ function buildSystem(
 async function runMemoryTool(
   raw: Record<string, unknown>,
   client: Mnemo,
+  containerTag: string,
   baseMetadata: Record<string, unknown>,
   defaultLimit: number,
 ): Promise<unknown> {
@@ -258,7 +297,23 @@ async function runMemoryTool(
     const limit = Number.isFinite(requested)
       ? Math.min(50, Math.max(1, Math.floor(requested)))
       : defaultLimit;
-    const results = (await client.search({ query, limit })).hits ?? [];
+    // Core 0.2.0 surface: `{ q, containerTag, limit }`. The container tag is
+    // injected from server config, never from `raw` (model output).
+    const response = await client.search({ q: query, containerTag, limit });
+    // confirmed against prod 2026-06-16. Core `search()` → SearchResponse, whose
+    // primary hits live in `results` (NOT `hits`). Each is a SearchHit:
+    // { resultType, memoryId, scopeKey, content, metadata, memoryType, polarity,
+    //   score, createdAt, updatedAt }. Surface the most useful fields back to
+    // Claude — content + score drive its recall decision — and keep memoryId so
+    // a follow-up turn can reference a specific memory.
+    const hits = response.results ?? [];
+    const results = hits.map((h) => ({
+      memoryId: h.memoryId,
+      content: h.content,
+      score: h.score,
+      memoryType: h.memoryType,
+      polarity: h.polarity,
+    }));
     return { results };
   }
   if (action === "add") {
@@ -272,8 +327,20 @@ async function runMemoryTool(
     // baseMetadata (userId, workspaceId, etc.) cannot be overwritten by an
     // LLM via prompt injection — e.g. a model that emits
     // tags={"userId":"victim"} would otherwise reattribute the memory.
-    const memory = await client.add({ content, metadata: { ...tags, ...baseMetadata } });
-    return { memory };
+    // Core 0.2.0 surface: `{ content, containerTag, metadata }`.
+    const response = await client.add({
+      content,
+      containerTag,
+      metadata: { ...tags, ...baseMetadata },
+    });
+    // confirmed against prod 2026-06-16. Core `add()` → AddResponse:
+    // `{ scopeKey, scope, items: Memory[] }`. Hand the stored item id(s) and
+    // content back to Claude so it can confirm what was saved.
+    const items = (response.items ?? []).map((m) => ({
+      id: m.id,
+      content: m.content,
+    }));
+    return { saved: items.length, items };
   }
   return { error: `unknown action: ${action}` };
 }
