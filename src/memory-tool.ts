@@ -1,4 +1,4 @@
-import type { Mnemo } from "getmnemo";
+import { Mnemo } from "getmnemo";
 
 /** Structural subset of `Anthropic` we depend on — keeps the peer dep loose. */
 interface AnthropicLike {
@@ -32,7 +32,16 @@ interface ChatMessage {
 
 export interface WithMemoryToolOptions {
   client: AnthropicLike;
-  getmnemo: Mnemo;
+  /**
+   * A `Mnemo` instance from `getmnemo`. Optional — when omitted, the wrapper
+   * constructs its own client from `apiKey` (or `GETMNEMO_API_KEY`).
+   */
+  getmnemo?: Mnemo;
+  /**
+   * Mnemo API key, used only when no `getmnemo` client is passed. Falls back
+   * to `process.env.GETMNEMO_API_KEY`.
+   */
+  apiKey?: string;
   /**
    * REQUIRED. The container tag (e.g. `"user:jane"`) that scopes every memory
    * read/write for this wrapper. This is the TENANT-ISOLATION BOUNDARY and is
@@ -107,6 +116,7 @@ export function withMemoryTool(
         "scope for all memory reads/writes. Supply it server-side.",
     );
   }
+  const mnemo = resolveMnemo(options);
   const defaults = {
     containerTag: options.containerTag,
     model: options.model ?? "claude-sonnet-4-6",
@@ -229,7 +239,7 @@ export function withMemoryTool(
           toolCalls += 1;
           const result = await runMemoryTool(
             use.input,
-            options.getmnemo,
+            mnemo,
             // Server-controlled container tag — the tenant boundary. Injected
             // here; never sourced from `use.input` (model output).
             runContainerTag,
@@ -268,6 +278,18 @@ function finalize(
   return { text, responses, memoryToolCalls, messages };
 }
 
+function resolveMnemo(options: WithMemoryToolOptions): Mnemo {
+  if (options.getmnemo) return options.getmnemo;
+  const apiKey = options.apiKey ?? process.env.GETMNEMO_API_KEY;
+  if (!apiKey) {
+    throw new Error(
+      "withMemoryTool: pass a `getmnemo` client, or an `apiKey` (or set " +
+        "GETMNEMO_API_KEY) so the wrapper can construct one.",
+    );
+  }
+  return new Mnemo({ apiKey });
+}
+
 function buildSystem(
   system: string | undefined,
   cache: boolean,
@@ -297,9 +319,21 @@ async function runMemoryTool(
     const limit = Number.isFinite(requested)
       ? Math.min(50, Math.max(1, Math.floor(requested)))
       : defaultLimit;
-    // Core 0.2.0 surface: `{ q, containerTag, limit }`. The container tag is
+    // Core 0.6.0 surface: `{ q, containerTag, limit }`. The container tag is
     // injected from server config, never from `raw` (model output).
-    const response = await client.search({ q: query, containerTag, limit });
+    let response;
+    try {
+      response = await client.search({ q: query, containerTag, limit });
+    } catch (err: unknown) {
+      // A brand-new container has no memories yet — the API answers a search
+      // against a not-yet-written container with 404 "Container not found".
+      // For the memory tool that means "nothing remembered yet", not a fatal
+      // error → return empty results instead of crashing the tool loop.
+      if (err instanceof Error && (err as { status?: number }).status === 404) {
+        return { results: [] };
+      }
+      throw err;
+    }
     // confirmed against prod 2026-06-16. Core `search()` → SearchResponse, whose
     // primary hits live in `results` (NOT `hits`). Each is a SearchHit:
     // { resultType, memoryId, scopeKey, content, metadata, memoryType, polarity,
@@ -327,7 +361,7 @@ async function runMemoryTool(
     // baseMetadata (userId, workspaceId, etc.) cannot be overwritten by an
     // LLM via prompt injection — e.g. a model that emits
     // tags={"userId":"victim"} would otherwise reattribute the memory.
-    // Core 0.2.0 surface: `{ content, containerTag, metadata }`.
+    // Core 0.6.0 surface: `{ content, containerTag, metadata }`.
     const response = await client.add({
       content,
       containerTag,

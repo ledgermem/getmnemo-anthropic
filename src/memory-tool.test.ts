@@ -285,4 +285,108 @@ describe("withMemoryTool", () => {
     expect(client.messages.create).toHaveBeenCalledTimes(2);
     expect(out.memoryToolCalls).toBe(2);
   });
+
+  it("treats a 404 on search (empty container) as empty results", async () => {
+    const getmnemo = fakeMnemo();
+    getmnemo.search = vi
+      .fn()
+      .mockRejectedValue(
+        Object.assign(new Error("[404] Container not found"), { status: 404 }),
+      );
+    const client = {
+      messages: {
+        create: vi
+          .fn()
+          .mockResolvedValueOnce({
+            id: "r1",
+            stop_reason: "tool_use",
+            content: [
+              {
+                type: "tool_use",
+                id: "tu_1",
+                name: MEMORY_TOOL_NAME,
+                input: { action: "search", query: "anything" },
+              },
+            ],
+          })
+          .mockResolvedValueOnce({
+            id: "r2",
+            stop_reason: "end_turn",
+            content: [{ type: "text", text: "nothing yet" }],
+          }),
+      },
+    };
+    const wrap = withMemoryTool({ client, getmnemo, containerTag: CONTAINER_TAG });
+    const out = await wrap.run({
+      messages: [{ role: "user", content: "what do you know about me?" }],
+    });
+    expect(out.text).toBe("nothing yet");
+    const toolResultMsg = out.messages[2];
+    const block = (toolResultMsg.content as any[])[0];
+    expect(block.type).toBe("tool_result");
+    expect(block.is_error).toBeUndefined();
+    expect(JSON.parse(block.content)).toEqual({ results: [] });
+  });
+
+  it("still throws on non-404 search errors", async () => {
+    const getmnemo = fakeMnemo();
+    getmnemo.search = vi
+      .fn()
+      .mockRejectedValue(
+        Object.assign(new Error("[500] boom"), { status: 500 }),
+      );
+    const client = {
+      messages: {
+        create: vi.fn().mockResolvedValue({
+          id: "r1",
+          stop_reason: "tool_use",
+          content: [
+            {
+              type: "tool_use",
+              id: "tu_1",
+              name: MEMORY_TOOL_NAME,
+              input: { action: "search", query: "anything" },
+            },
+          ],
+        }),
+      },
+    };
+    const wrap = withMemoryTool({ client, getmnemo, containerTag: CONTAINER_TAG });
+    await expect(
+      wrap.run({ messages: [{ role: "user", content: "hi" }] }),
+    ).rejects.toThrow(/500/);
+  });
+
+  it("constructs its own Mnemo client from apiKey when none is passed", async () => {
+    const client = {
+      messages: {
+        create: vi.fn().mockResolvedValue({
+          id: "r1",
+          stop_reason: "end_turn",
+          content: [{ type: "text", text: "ok" }],
+        }),
+      },
+    };
+    const wrap = withMemoryTool({
+      client,
+      apiKey: "test-key",
+      containerTag: CONTAINER_TAG,
+    });
+    const out = await wrap.run({ messages: [{ role: "user", content: "hi" }] });
+    expect(out.text).toBe("ok");
+  });
+
+  it("throws when neither a getmnemo client nor an apiKey is available", () => {
+    vi.stubEnv("GETMNEMO_API_KEY", "");
+    try {
+      expect(() =>
+        withMemoryTool({
+          client: { messages: { create: vi.fn() } },
+          containerTag: CONTAINER_TAG,
+        }),
+      ).toThrow(/apiKey/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 });

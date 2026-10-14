@@ -11,29 +11,23 @@ assistant.
 npm install getmnemo-anthropic @anthropic-ai/sdk
 ```
 
-`getmnemo` (the core SDK) is pulled in automatically as a dependency. You only
-need `@anthropic-ai/sdk` because you construct the Anthropic client yourself and
-pass it in.
+`getmnemo` (the core SDK, `^0.6`) is pulled in automatically as a dependency —
+no separate pin needed. You only need `@anthropic-ai/sdk` because you construct
+the Anthropic client yourself and pass it in.
 
-Get your Mnemo API key and workspace ID from
+Get your Mnemo API key from
 [app.mnemohq.com/settings/api-keys](https://app.mnemohq.com/settings/api-keys).
 
 ## Quickstart (30 seconds)
 
 ```ts
 import Anthropic from "@anthropic-ai/sdk";
-import { Mnemo } from "getmnemo";
 import { withMemoryTool } from "getmnemo-anthropic";
 
-const claude = new Anthropic();
-const memory = new Mnemo({
-  apiKey: process.env.GETMNEMO_API_KEY!,
-  workspaceId: process.env.GETMNEMO_WORKSPACE_ID!,
-});
-
 const agent = withMemoryTool({
-  client: claude,
-  getmnemo: memory,
+  client: new Anthropic(),
+  apiKey: process.env.GETMNEMO_API_KEY!,
+  containerTag: "user:jane",
   model: "claude-sonnet-4-6",
   thinkingBudgetTokens: 4000,
 });
@@ -47,6 +41,32 @@ const result = await agent.run({
 console.log(result.text);
 console.log("memory tool calls:", result.memoryToolCalls);
 ```
+
+Already have a configured `Mnemo` instance? Pass it via `getmnemo` instead of
+`apiKey` — both forms work:
+
+```ts
+import { Mnemo } from "getmnemo";
+
+const agent = withMemoryTool({
+  client: new Anthropic(),
+  getmnemo: new Mnemo({ apiKey: process.env.GETMNEMO_API_KEY! }),
+  containerTag: "user:jane",
+});
+```
+
+## Containers
+
+`containerTag` is required. It scopes every memory read/write and is the
+tenant-isolation boundary — supply it server-side (e.g. `"user:<your-user-id>"`).
+It is deliberately absent from the model-facing tool schema, so a model (or a
+prompt-injection attacker) can never pick another tenant's container. Override
+it per `run()` call via `run({ containerTag })` when one wrapper serves many
+users.
+
+Searching a container that nothing has written to yet returns no matches: the
+wrapper handles the API's 404 ("Container not found") for brand-new containers
+and hands the model `{ results: [] }` instead of failing the tool call.
 
 ## What the wrapper does
 
@@ -67,7 +87,9 @@ console.log("memory tool calls:", result.memoryToolCalls);
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `client` | `Anthropic` | — | An `@anthropic-ai/sdk` client (anything with `messages.create`). |
-| `getmnemo` | `Mnemo` | — | A `Mnemo` instance from `getmnemo`. |
+| `getmnemo` | `Mnemo` | — | A `Mnemo` instance from `getmnemo`. Optional — omit it and pass `apiKey` instead. |
+| `apiKey` | `string` | `GETMNEMO_API_KEY` | Mnemo API key the wrapper uses to construct its own client when `getmnemo` is not passed. |
+| `containerTag` | `string` | — | **Required.** Tenant-isolation boundary for all memory reads/writes (e.g. `"user:jane"`). |
 | `model` | `string` | `"claude-sonnet-4-6"` | Default model; override per call. |
 | `maxTokens` | `number` | `1024` | Default `max_tokens`; override per call. |
 | `searchLimit` | `number` | `5` | Default top-k for memory search (clamped to 1–50). |
@@ -85,6 +107,7 @@ console.log("memory tool calls:", result.memoryToolCalls);
 | `model` | `string` | Per-call model override. |
 | `maxTokens` | `number` | Per-call `max_tokens` override. |
 | `metadata` | `Record<string, unknown>` | Per-call metadata merged into persisted memories. |
+| `containerTag` | `string` | Per-call override of the configured container tag (still server-supplied, never model input). |
 
 Returns:
 
