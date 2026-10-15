@@ -1,16 +1,27 @@
 import { Mnemo } from "getmnemo";
 
-/** Structural subset of `Anthropic` we depend on — keeps the peer dep loose. */
-interface AnthropicLike {
+/**
+ * Structural subset of `Anthropic` we depend on — keeps the peer dep loose.
+ *
+ * `create` is typed loosely on purpose: the real SDK's `messages.create` is an
+ * overloaded function with strict param types, which no narrower signature
+ * here can match. `params: never` accepts any such function; the single call
+ * site below narrows it to the shape we actually send/read.
+ */
+export interface AnthropicLike {
   messages: {
-    create: (params: Record<string, unknown>) => Promise<MessagesCreateResult>;
+    create: (params: never) => PromiseLike<unknown>;
   };
 }
+
+type CreateFn = (
+  params: Record<string, unknown>,
+) => PromiseLike<MessagesCreateResult>;
 
 interface MessagesCreateResult {
   id: string;
   content: Array<MessageBlock>;
-  stop_reason: string;
+  stop_reason: string | null;
   usage?: Record<string, number>;
   [key: string]: unknown;
 }
@@ -53,7 +64,10 @@ export interface WithMemoryToolOptions {
   containerTag: string;
   /** Defaults to claude-sonnet-4-6. Override per call too. */
   model?: string;
-  /** Defaults to 1024. */
+  /**
+   * Defaults to 1024. With `thinkingBudgetTokens` set it must be strictly
+   * greater than the budget (Anthropic rejects the request otherwise).
+   */
   maxTokens?: number;
   /** Default top-k for memory search. */
   searchLimit?: number;
@@ -98,6 +112,21 @@ export interface WithMemoryToolWrapper {
 
 export const MEMORY_TOOL_NAME = "memory";
 
+const DEFAULT_MAX_TOKENS = 1024;
+
+function assertThinkingFits(
+  maxTokens: number,
+  thinkingBudgetTokens: number | undefined,
+): void {
+  if (thinkingBudgetTokens && maxTokens <= thinkingBudgetTokens) {
+    throw new Error(
+      `withMemoryTool: maxTokens (${maxTokens}) must be greater than ` +
+        `thinkingBudgetTokens (${thinkingBudgetTokens}) — Anthropic rejects ` +
+        "budget_tokens >= max_tokens. Raise maxTokens (e.g. 8192).",
+    );
+  }
+}
+
 /**
  * Wrap an `Anthropic` client so a single `memory` tool (with `search`/`add`
  * actions) is exposed to the model and the tool-use loop is handled for you.
@@ -116,11 +145,15 @@ export function withMemoryTool(
         "scope for all memory reads/writes. Supply it server-side.",
     );
   }
+  assertThinkingFits(options.maxTokens ?? DEFAULT_MAX_TOKENS, options.thinkingBudgetTokens);
   const mnemo = resolveMnemo(options);
+  const createMessage = options.client.messages.create.bind(
+    options.client.messages,
+  ) as unknown as CreateFn;
   const defaults = {
     containerTag: options.containerTag,
     model: options.model ?? "claude-sonnet-4-6",
-    maxTokens: options.maxTokens ?? 1024,
+    maxTokens: options.maxTokens ?? DEFAULT_MAX_TOKENS,
     searchLimit: options.searchLimit ?? 5,
     cacheSystem: options.cacheSystem ?? true,
     thinkingBudgetTokens: options.thinkingBudgetTokens,
@@ -187,10 +220,12 @@ export function withMemoryTool(
           ? input.containerTag
           : defaults.containerTag;
 
+      const maxTokens = input.maxTokens ?? defaults.maxTokens;
+      assertThinkingFits(maxTokens, defaults.thinkingBudgetTokens);
       const system = buildSystem(input.system, defaults.cacheSystem);
       const baseParams: Record<string, unknown> = {
         model: input.model ?? defaults.model,
-        max_tokens: input.maxTokens ?? defaults.maxTokens,
+        max_tokens: maxTokens,
         tools: [tool],
         ...(system ? { system } : {}),
       };
@@ -202,7 +237,7 @@ export function withMemoryTool(
       }
 
       for (let i = 0; i < defaults.maxIterations; i++) {
-        const resp = await options.client.messages.create({
+        const resp = await createMessage({
           ...baseParams,
           messages,
         });
@@ -329,7 +364,7 @@ async function runMemoryTool(
       // against a not-yet-written container with 404 "Container not found".
       // For the memory tool that means "nothing remembered yet", not a fatal
       // error → return empty results instead of crashing the tool loop.
-      if (err instanceof Error && (err as { status?: number }).status === 404) {
+      if (isContainerNotFound(err)) {
         return { results: [] };
       }
       throw err;
@@ -377,4 +412,19 @@ async function runMemoryTool(
     return { saved: items.length, items };
   }
   return { error: `unknown action: ${action}` };
+}
+
+/**
+ * True only for the API's 404 "Container not found" (a brand-new container
+ * nothing has been written to). Other 404s are rethrown.
+ */
+function isContainerNotFound(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if ((err as { status?: unknown }).status !== 404) return false;
+  const body = (err as { body?: unknown }).body;
+  const code =
+    body && typeof body === "object" && "code" in body
+      ? String((body as { code?: unknown }).code)
+      : "";
+  return /container/i.test(err.message) || /container/i.test(code);
 }

@@ -29,6 +29,7 @@ const agent = withMemoryTool({
   apiKey: process.env.GETMNEMO_API_KEY!,
   containerTag: "user:jane",
   model: "claude-sonnet-4-6",
+  maxTokens: 8192, // must exceed thinkingBudgetTokens
   thinkingBudgetTokens: 4000,
 });
 
@@ -94,7 +95,7 @@ and hands the model `{ results: [] }` instead of failing the tool call.
 | `maxTokens` | `number` | `1024` | Default `max_tokens`; override per call. |
 | `searchLimit` | `number` | `5` | Default top-k for memory search (clamped to 1–50). |
 | `cacheSystem` | `boolean` | `true` | Wrap the system prompt with `cache_control: { type: "ephemeral" }`. |
-| `thinkingBudgetTokens` | `number` | — | Enable extended thinking with this token budget. |
+| `thinkingBudgetTokens` | `number` | — | Enable extended thinking with this token budget. `maxTokens` must be greater (checked at construction and per run). |
 | `metadata` | `Record<string, unknown>` | `{}` | Static metadata merged into every persisted memory. |
 | `maxIterations` | `number` | `6` | Hard cap on tool-use loop iterations. |
 

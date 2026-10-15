@@ -137,11 +137,49 @@ describe("withMemoryTool", () => {
       client,
       getmnemo: fakeMnemo(),
       containerTag: CONTAINER_TAG,
+      maxTokens: 8192,
       thinkingBudgetTokens: 4000,
     });
     await wrap.run({ messages: [{ role: "user", content: "hi" }] });
     const params = client.messages.create.mock.calls[0]![0] as any;
     expect(params.thinking).toEqual({ type: "enabled", budget_tokens: 4000 });
+    expect(params.max_tokens).toBe(8192);
+  });
+
+  it("throws at construction when maxTokens <= thinkingBudgetTokens", () => {
+    const client = { messages: { create: vi.fn() } };
+    expect(() =>
+      withMemoryTool({
+        client,
+        getmnemo: fakeMnemo(),
+        containerTag: CONTAINER_TAG,
+        thinkingBudgetTokens: 4000,
+      }),
+    ).toThrow(/maxTokens \(1024\) must be greater than thinkingBudgetTokens \(4000\)/);
+    expect(() =>
+      withMemoryTool({
+        client,
+        getmnemo: fakeMnemo(),
+        containerTag: CONTAINER_TAG,
+        maxTokens: 4000,
+        thinkingBudgetTokens: 4000,
+      }),
+    ).toThrow(/must be greater than/);
+  });
+
+  it("rejects a per-run maxTokens override that does not exceed the thinking budget", async () => {
+    const client = { messages: { create: vi.fn() } };
+    const wrap = withMemoryTool({
+      client,
+      getmnemo: fakeMnemo(),
+      containerTag: CONTAINER_TAG,
+      maxTokens: 8192,
+      thinkingBudgetTokens: 4000,
+    });
+    await expect(
+      wrap.run({ messages: [{ role: "user", content: "hi" }], maxTokens: 2000 }),
+    ).rejects.toThrow(/must be greater than/);
+    expect(client.messages.create).not.toHaveBeenCalled();
   });
 
   it("throws when no containerTag is configured", () => {
@@ -326,6 +364,35 @@ describe("withMemoryTool", () => {
     expect(block.type).toBe("tool_result");
     expect(block.is_error).toBeUndefined();
     expect(JSON.parse(block.content)).toEqual({ results: [] });
+  });
+
+  it("rethrows a 404 that is not container-not-found", async () => {
+    const getmnemo = fakeMnemo();
+    getmnemo.search = vi
+      .fn()
+      .mockRejectedValue(
+        Object.assign(new Error("[404] Route not found"), { status: 404 }),
+      );
+    const client = {
+      messages: {
+        create: vi.fn().mockResolvedValue({
+          id: "r1",
+          stop_reason: "tool_use",
+          content: [
+            {
+              type: "tool_use",
+              id: "tu_1",
+              name: MEMORY_TOOL_NAME,
+              input: { action: "search", query: "anything" },
+            },
+          ],
+        }),
+      },
+    };
+    const wrap = withMemoryTool({ client, getmnemo, containerTag: CONTAINER_TAG });
+    await expect(
+      wrap.run({ messages: [{ role: "user", content: "hi" }] }),
+    ).rejects.toThrow(/Route not found/);
   });
 
   it("still throws on non-404 search errors", async () => {
