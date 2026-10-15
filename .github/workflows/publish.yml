@@ -6,10 +6,9 @@ on:
   workflow_dispatch:
 
 jobs:
-  # Real LLM-driven round-trip: wires this package's withMemoryTool to a live
-  # Anthropic + Mnemo client and asserts the memory tool fires on a store turn
-  # and the fact is recalled on a later turn. Publish CANNOT run unless this
-  # passes (see `needs: smoke` on the publish job below).
+  # Real prod round-trip: drives withMemoryTool with a scripted fake Anthropic
+  # client (no LLM key) so the real tool dispatch hits the live Mnemo API.
+  # Publish CANNOT run unless this passes (see `needs: smoke` below).
   smoke:
     runs-on: ubuntu-latest
     permissions: { contents: read }
@@ -25,7 +24,6 @@ jobs:
           MNEMO_API_KEY: ${{ secrets.MNEMO_API_KEY }}
           MNEMO_WORKSPACE_ID: ${{ secrets.MNEMO_WORKSPACE_ID }}
           MNEMO_TEST_CONTAINER: ${{ secrets.MNEMO_TEST_CONTAINER }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
   publish:
     needs: smoke
