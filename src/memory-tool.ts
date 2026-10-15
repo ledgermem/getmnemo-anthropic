@@ -1,16 +1,27 @@
-import type { Mnemo } from "getmnemo";
+import { Mnemo } from "getmnemo";
 
-/** Structural subset of `Anthropic` we depend on — keeps the peer dep loose. */
-interface AnthropicLike {
+/**
+ * Structural subset of `Anthropic` we depend on — keeps the peer dep loose.
+ *
+ * `create` is typed loosely on purpose: the real SDK's `messages.create` is an
+ * overloaded function with strict param types, which no narrower signature
+ * here can match. `params: never` accepts any such function; the single call
+ * site below narrows it to the shape we actually send/read.
+ */
+export interface AnthropicLike {
   messages: {
-    create: (params: Record<string, unknown>) => Promise<MessagesCreateResult>;
+    create: (params: never) => PromiseLike<unknown>;
   };
 }
+
+type CreateFn = (
+  params: Record<string, unknown>,
+) => PromiseLike<MessagesCreateResult>;
 
 interface MessagesCreateResult {
   id: string;
   content: Array<MessageBlock>;
-  stop_reason: string;
+  stop_reason: string | null;
   usage?: Record<string, number>;
   [key: string]: unknown;
 }
@@ -32,7 +43,16 @@ interface ChatMessage {
 
 export interface WithMemoryToolOptions {
   client: AnthropicLike;
-  getmnemo: Mnemo;
+  /**
+   * A `Mnemo` instance from `getmnemo`. Optional — when omitted, the wrapper
+   * constructs its own client from `apiKey` (or `GETMNEMO_API_KEY`).
+   */
+  getmnemo?: Mnemo;
+  /**
+   * Mnemo API key, used only when no `getmnemo` client is passed. Falls back
+   * to `process.env.GETMNEMO_API_KEY`.
+   */
+  apiKey?: string;
   /**
    * REQUIRED. The container tag (e.g. `"user:jane"`) that scopes every memory
    * read/write for this wrapper. This is the TENANT-ISOLATION BOUNDARY and is
@@ -44,7 +64,10 @@ export interface WithMemoryToolOptions {
   containerTag: string;
   /** Defaults to claude-sonnet-4-6. Override per call too. */
   model?: string;
-  /** Defaults to 1024. */
+  /**
+   * Defaults to 1024. With `thinkingBudgetTokens` set it must be strictly
+   * greater than the budget (Anthropic rejects the request otherwise).
+   */
   maxTokens?: number;
   /** Default top-k for memory search. */
   searchLimit?: number;
@@ -89,6 +112,21 @@ export interface WithMemoryToolWrapper {
 
 export const MEMORY_TOOL_NAME = "memory";
 
+const DEFAULT_MAX_TOKENS = 1024;
+
+function assertThinkingFits(
+  maxTokens: number,
+  thinkingBudgetTokens: number | undefined,
+): void {
+  if (thinkingBudgetTokens && maxTokens <= thinkingBudgetTokens) {
+    throw new Error(
+      `withMemoryTool: maxTokens (${maxTokens}) must be greater than ` +
+        `thinkingBudgetTokens (${thinkingBudgetTokens}) — Anthropic rejects ` +
+        "budget_tokens >= max_tokens. Raise maxTokens (e.g. 8192).",
+    );
+  }
+}
+
 /**
  * Wrap an `Anthropic` client so a single `memory` tool (with `search`/`add`
  * actions) is exposed to the model and the tool-use loop is handled for you.
@@ -107,10 +145,15 @@ export function withMemoryTool(
         "scope for all memory reads/writes. Supply it server-side.",
     );
   }
+  assertThinkingFits(options.maxTokens ?? DEFAULT_MAX_TOKENS, options.thinkingBudgetTokens);
+  const mnemo = resolveMnemo(options);
+  const createMessage = options.client.messages.create.bind(
+    options.client.messages,
+  ) as unknown as CreateFn;
   const defaults = {
     containerTag: options.containerTag,
     model: options.model ?? "claude-sonnet-4-6",
-    maxTokens: options.maxTokens ?? 1024,
+    maxTokens: options.maxTokens ?? DEFAULT_MAX_TOKENS,
     searchLimit: options.searchLimit ?? 5,
     cacheSystem: options.cacheSystem ?? true,
     thinkingBudgetTokens: options.thinkingBudgetTokens,
@@ -177,10 +220,12 @@ export function withMemoryTool(
           ? input.containerTag
           : defaults.containerTag;
 
+      const maxTokens = input.maxTokens ?? defaults.maxTokens;
+      assertThinkingFits(maxTokens, defaults.thinkingBudgetTokens);
       const system = buildSystem(input.system, defaults.cacheSystem);
       const baseParams: Record<string, unknown> = {
         model: input.model ?? defaults.model,
-        max_tokens: input.maxTokens ?? defaults.maxTokens,
+        max_tokens: maxTokens,
         tools: [tool],
         ...(system ? { system } : {}),
       };
@@ -192,7 +237,7 @@ export function withMemoryTool(
       }
 
       for (let i = 0; i < defaults.maxIterations; i++) {
-        const resp = await options.client.messages.create({
+        const resp = await createMessage({
           ...baseParams,
           messages,
         });
@@ -229,7 +274,7 @@ export function withMemoryTool(
           toolCalls += 1;
           const result = await runMemoryTool(
             use.input,
-            options.getmnemo,
+            mnemo,
             // Server-controlled container tag — the tenant boundary. Injected
             // here; never sourced from `use.input` (model output).
             runContainerTag,
@@ -268,6 +313,18 @@ function finalize(
   return { text, responses, memoryToolCalls, messages };
 }
 
+function resolveMnemo(options: WithMemoryToolOptions): Mnemo {
+  if (options.getmnemo) return options.getmnemo;
+  const apiKey = options.apiKey ?? process.env.GETMNEMO_API_KEY;
+  if (!apiKey) {
+    throw new Error(
+      "withMemoryTool: pass a `getmnemo` client, or an `apiKey` (or set " +
+        "GETMNEMO_API_KEY) so the wrapper can construct one.",
+    );
+  }
+  return new Mnemo({ apiKey });
+}
+
 function buildSystem(
   system: string | undefined,
   cache: boolean,
@@ -297,9 +354,21 @@ async function runMemoryTool(
     const limit = Number.isFinite(requested)
       ? Math.min(50, Math.max(1, Math.floor(requested)))
       : defaultLimit;
-    // Core 0.2.0 surface: `{ q, containerTag, limit }`. The container tag is
+    // Core 0.6.0 surface: `{ q, containerTag, limit }`. The container tag is
     // injected from server config, never from `raw` (model output).
-    const response = await client.search({ q: query, containerTag, limit });
+    let response;
+    try {
+      response = await client.search({ q: query, containerTag, limit });
+    } catch (err: unknown) {
+      // A brand-new container has no memories yet — the API answers a search
+      // against a not-yet-written container with 404 "Container not found".
+      // For the memory tool that means "nothing remembered yet", not a fatal
+      // error → return empty results instead of crashing the tool loop.
+      if (isContainerNotFound(err)) {
+        return { results: [] };
+      }
+      throw err;
+    }
     // confirmed against prod 2026-06-16. Core `search()` → SearchResponse, whose
     // primary hits live in `results` (NOT `hits`). Each is a SearchHit:
     // { resultType, memoryId, scopeKey, content, metadata, memoryType, polarity,
@@ -327,7 +396,7 @@ async function runMemoryTool(
     // baseMetadata (userId, workspaceId, etc.) cannot be overwritten by an
     // LLM via prompt injection — e.g. a model that emits
     // tags={"userId":"victim"} would otherwise reattribute the memory.
-    // Core 0.2.0 surface: `{ content, containerTag, metadata }`.
+    // Core 0.6.0 surface: `{ content, containerTag, metadata }`.
     const response = await client.add({
       content,
       containerTag,
@@ -343,4 +412,19 @@ async function runMemoryTool(
     return { saved: items.length, items };
   }
   return { error: `unknown action: ${action}` };
+}
+
+/**
+ * True only for the API's 404 "Container not found" (a brand-new container
+ * nothing has been written to). Other 404s are rethrown.
+ */
+function isContainerNotFound(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if ((err as { status?: unknown }).status !== 404) return false;
+  const body = (err as { body?: unknown }).body;
+  const code =
+    body && typeof body === "object" && "code" in body
+      ? String((body as { code?: unknown }).code)
+      : "";
+  return /container/i.test(err.message) || /container/i.test(code);
 }
